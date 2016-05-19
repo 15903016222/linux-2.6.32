@@ -1,0 +1,342 @@
+//#include <linux/config.h>
+#include <linux/moduleparam.h>
+#include <linux/module.h>
+#include <linux/version.h>
+#include <linux/types.h>
+#include <linux/errno.h>
+#include <linux/kernel.h>
+#include <linux/init.h>
+
+#include <linux/timer.h>
+#include <linux/sched.h>
+#include <linux/interrupt.h>
+#include <linux/pm.h>
+#include <linux/spinlock.h>
+#include <linux/delay.h>
+
+#include <linux/device.h>
+#include <linux/dma-mapping.h>
+
+#include <linux/io.h>
+
+#include <plat/dma.h>
+#include <plat/gpmc.h>
+#include <linux/timer.h>
+
+#define VERSION "20110107"
+
+#define TEST_SCHEDULE_FREQUENCY		(1)
+#define NR_TEST_THREADS			1
+
+#define	FB_WIDTH	768
+
+#define	DMA_LENGTH	196000
+
+
+void get_random_bytes(void *buf, int nbytes);
+
+static void omap_dmatest_work(unsigned long data);
+
+static void *test_threads[NR_TEST_THREADS];
+static unsigned int data_addr2;
+static struct dma_transfer dma_video;
+
+
+static unsigned int video_phys_to	= 0x80a8f000;
+module_param(video_phys_to, int, S_IRUGO);
+
+struct thread_data {
+	int nr;
+	pid_t pid;
+	char * name;
+};
+
+struct dma_transfer {
+	unsigned long virt_from;
+	unsigned long virt_to;
+	unsigned long phys_from;
+	unsigned long phys_to;
+	unsigned long len;
+	int ch;				/* Assigned DMA channel number */
+	unsigned short data_type;	/* Data length */
+	unsigned short elem_count;	/* Elements to transfer */
+	unsigned short frame_count;	/* Framses to transfer */
+	unsigned int status;		/* Callback status */
+};
+
+/*
+ * The callback gets called by the DMA interrupt handler after
+ * the transfer is complete.
+ */
+static void omap_dma_memcpy_callback(int lch, u16 ch_status, void *data)
+{
+	struct dma_transfer *dma = (struct dma_transfer *)data;
+	unsigned int *config_addr = (unsigned int *)(data_addr2 + 0x800000);
+
+	/* 这里是中断次数 */
+#if 0
+	if (dma->phys_to == 0x8F001000)
+	{
+/*		config_addr[0] = 1;*/
+		dma->phys_to = 0x8F000000;
+	}
+	else
+		dma->phys_to +=4 ;
+	omap_set_dma_dest_params(dma->ch, 0,
+			OMAP_DMA_AMODE_DOUBLE_IDX,
+			dma->phys_to, 1, 257);  /*^^^^^^^^*/
+/*	config_addr[1] = 0;*/
+
+/*	config_addr[0] = 1;*/
+	if (dma->phys_to == 0x8e000000)
+	{
+		config_addr[0] = 1;
+		dma->phys_to = 0x8f000000;
+	}
+	else if (dma->phys_to == 0x8F000000)
+	{
+		config_addr[0] = 2;
+		dma->phys_to = 0x8e000000;
+	}
+	omap_set_dma_dest_params(dma->ch, 0,
+			OMAP_DMA_AMODE_DOUBLE_IDX,
+			dma->phys_to, 1, 257);  /*^^^^^^^^*/
+#endif
+
+#if 0
+	while (config_addr[0])
+	{
+		current->state = TASK_INTERRUPTIBLE;
+		schedule_timeout(1);
+		current->state = TASK_RUNNING;
+	}
+#endif
+
+	if (config_addr[0] == 1)
+	{
+		config_addr[0] = 2;
+		omap_start_dma(dma_video.ch);
+	}
+	omap_start_dma(dma->ch);
+	return ;
+}
+
+static int omap_dma_mem_transfer(struct dma_transfer * dma)
+{
+	int src_port;
+	int dst_port;
+	int sync_dev;
+
+	dma->data_type = OMAP_DMA_DATA_TYPE_S16;
+	dma->status = 0;
+
+	src_port = 0;
+	dst_port = 0;
+	sync_dev = 0;
+
+	dma->elem_count = dma->len;
+	dma->frame_count = 192;
+
+	/* Get a DMA channel */
+	if (omap_request_dma(OMAP34XX_DMA_EXT_DMAREQ3, "gpmc to mem", 
+				omap_dma_memcpy_callback, (void *)dma, &dma->ch)) {
+		printk(KERN_ERR "Could not get DMA with omap_request_dma()\n");
+		return -ENOMEM;
+	}
+
+	if (cpu_is_omap34xx()) 
+	{
+		sync_dev = OMAP34XX_DMA_EXT_DMAREQ3;
+	}
+
+	/* Transfer len = (data_type * elem_count * frame_count) */
+	omap_set_dma_transfer_params(dma->ch, dma->data_type, dma->elem_count, 
+			dma->frame_count, OMAP_DMA_SYNC_BLOCK,
+			sync_dev, 0);
+	/* sync_dev 设置 synchro bitfield 为了dma_request +1  */
+
+	/* Source EMFIFF, increase source address after each transfer */
+	omap_set_dma_src_params(dma->ch, src_port,
+			OMAP_DMA_AMODE_DOUBLE_IDX,
+			dma->phys_from, 1, 1); /*^^^^^^^^^^*/
+
+	/* Destination EMIFF, increase dest address after each transfer */
+	omap_set_dma_dest_params(dma->ch, dst_port,
+			OMAP_DMA_AMODE_DOUBLE_IDX,
+			dma->phys_to, 1, 1);  /*^^^^^^^^*/
+
+	omap_start_dma(dma->ch);
+
+	/**
+	while(!dma->status)
+	{
+		current->state = TASK_INTERRUPTIBLE;
+		schedule_timeout(1);
+		current->state = TASK_RUNNING;
+	}
+	**/
+
+	return 0;
+}
+
+static void omap_dma_memcpy_callback1(int lch, u16 ch_status, void *data)
+{
+	struct dma_transfer *dma = (struct dma_transfer *)data;
+	unsigned int *config_addr = (unsigned int *)(data_addr2 + 0x800000);
+
+	config_addr[0] = 0;
+	return ;
+}
+
+static int omap_dma_mem_transfer1(struct dma_transfer * dma)
+{
+	int src_port;
+	int dst_port;
+	int sync_dev;
+
+	dma->data_type = OMAP_DMA_DATA_TYPE_S16;
+	dma->status = 0;
+
+	src_port = 0;
+	dst_port = 0;
+	sync_dev = 0;
+
+	dma->elem_count = dma->len;
+	dma->frame_count = 400; /* 多少个beam 还是如何 */
+
+	/* Get a DMA channel */
+	if (omap_request_dma(OMAP24XX_DMA_NO_DEVICE, "mem to mem", 
+				omap_dma_memcpy_callback1, (void *)dma, &dma->ch)) {
+		printk(KERN_ERR "Could not get DMA with omap_request_dma()\n");
+		return -ENOMEM;
+	}
+
+	if (cpu_is_omap34xx()) 
+	{
+		sync_dev = OMAP24XX_DMA_NO_DEVICE;
+	}
+
+	/* Transfer len = (data_type * elem_count * frame_count) */
+	omap_set_dma_transfer_params(dma->ch, dma->data_type, dma->elem_count, 
+			dma->frame_count, OMAP_DMA_SYNC_BLOCK,
+			sync_dev, 0);
+	/* sync_dev 设置 synchro bitfield 为了dma_request +1  */
+
+	/* Source EMFIFF, increase source address after each transfer */
+	omap_set_dma_src_params(dma->ch, src_port,
+			OMAP_DMA_AMODE_DOUBLE_IDX,
+			dma->phys_from, 1, 1); /*^^^^^^^^^^*/
+
+	/* Destination EMIFF, increase dest address after each transfer */
+	omap_set_dma_dest_params(dma->ch, dst_port,
+			OMAP_DMA_AMODE_DOUBLE_IDX,
+			dma->phys_to, 1, 1);  /*^^^^^^^^*/
+
+	omap_start_dma(dma->ch);
+
+	/**
+	while(!dma->status)
+	{
+		current->state = TASK_INTERRUPTIBLE;
+		schedule_timeout(1);
+		current->state = TASK_RUNNING;
+	}
+	*/
+
+	return 0;
+}
+
+static void omap_dmatest_work(unsigned long data)
+{
+	struct dma_transfer * dma;
+	int ret;
+	struct thread_data * thread = (struct thread_data *)data;
+
+	/* Wait for 10 secs before starting */
+	daemonize("%s", thread->name);
+	allow_signal(SIGTERM);
+	current->state = TASK_INTERRUPTIBLE;
+	schedule_timeout(HZ * 5);
+	current->state = TASK_RUNNING;
+
+	/* FIXME: Does not free mem in SIGTERM currently */
+	if (signal_pending(current))
+		flush_signals(current);
+	/* Set up transfer data */
+	dma = kmalloc(sizeof(struct dma_transfer), GFP_KERNEL);
+	if (!dma) {
+		printk(KERN_ERR "Could not kmalloc DMA transfer\n");
+		return;
+	}
+	memset(dma, 0, sizeof(struct dma_transfer));
+	dma->len = 1024; 
+	dma->phys_from	= 0x28000000; 
+	dma->phys_to	= 0x8F000000; 
+	ret = omap_dma_mem_transfer(dma);
+	/* Do the transfer */
+
+	memset(&dma_video, 0, sizeof(struct dma_transfer));
+	dma_video.len = 768;
+	dma_video.phys_from = video_phys_to + 768*400*2;
+	dma_video.phys_to = video_phys_to;
+
+	ret = omap_dma_mem_transfer1(&dma_video);
+
+	if (ret) {
+		/* Anything to do? */
+	}
+
+	return ;
+}
+
+static char *name = "dmatest";
+
+static int __init omap_dmatest_init(void)
+{
+	int i;
+	struct thread_data * thread;
+
+	/* Schedule multiple concurrent dma tests */
+	memset(test_threads, 0, NR_TEST_THREADS * sizeof(void *));
+
+	thread = kmalloc(sizeof(struct thread_data), GFP_KERNEL);
+	if (!thread)
+		goto free_threads;
+
+	memset(thread, 0, sizeof(struct thread_data));
+	thread->nr = 1;
+	thread->name = name;
+
+	/* Schedule the test thread */
+	thread->pid = kernel_thread((void *)omap_dmatest_work, 
+			thread, 0);
+
+	test_threads[1] = thread;
+
+	request_mem_region(0x8F000000, 16*1024*1024, "dma_data");
+	data_addr2 = (unsigned int )ioremap(0x8F000000, 16*1024*1024);
+
+	printk("WARNING: OMAP DMA cache test version %s scheduled. "
+			"Hogs CPU, do not use for production!\n", VERSION);
+
+	return 0;
+
+free_threads:
+	for (i = 0; i < NR_TEST_THREADS; i++ ) {
+		if (test_threads[i])
+			kfree(test_threads[i]);
+	}
+
+	return -ENOMEM;
+}
+
+static void __exit omap_dmatest_exit(void)
+{
+	return;
+}
+
+MODULE_AUTHOR("TT  <TT@163.com>");
+MODULE_DESCRIPTION("OMAP DMA test module");
+MODULE_LICENSE("Dual BSD/GPL");
+module_init(omap_dmatest_init);
+module_exit(omap_dmatest_exit);
