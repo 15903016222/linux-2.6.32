@@ -826,8 +826,15 @@ static void icmp_echo(struct sk_buff *skb)
 	net = dev_net(skb_dst(skb)->dev);
 	if (!net->ipv4.sysctl_icmp_echo_ignore_all) {
 		struct icmp_bxm icmp_param;
+        struct icmphdr *p_icmphdr;
 
-		icmp_param.data.icmph	   = *icmp_hdr(skb);
+        p_icmphdr = icmp_hdr(skb);
+        icmp_param.data.icmph.type = p_icmphdr->type;
+        icmp_param.data.icmph.code = p_icmphdr->code;
+        icmp_param.data.icmph.checksum = p_icmphdr->checksum;
+        memcpy(&(icmp_param.data.icmph.un), &(p_icmphdr->un), 
+                            sizeof(icmp_param.data.icmph.un));
+
 		icmp_param.data.icmph.type = ICMP_ECHOREPLY;
 		icmp_param.skb		   = skb;
 		icmp_param.offset	   = 0;
